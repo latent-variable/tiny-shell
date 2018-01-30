@@ -145,7 +145,7 @@ int main(int argc, char **argv)
 	}
 
 	/* Evaluate the command line */
-	eval(cmdline);
+  if(*cmdline != '\n') eval(cmdline);
 	fflush(stdout);
 	fflush(stdout);
     }
@@ -180,13 +180,14 @@ void eval(char *cmdline)
       pid_t pid;
       if((pid = fork()) == 0 ){ //child
           if(sigprocmask(SIG_UNBLOCK,&set,NULL) < 0) exit(0);
+          setpgid(0, 0);
           if(execve(argv[0],&argv[0],0)<0){
-            printf("%s, command not found.",argv[0]);
+            printf("%s: command not found.\n",argv[0]);
             exit(0);
           }
 
       }else{  //parent
-          int jid = addjob( jobs, pid, state, cmdline);
+          addjob( jobs, pid, state, cmdline);
           if(sigprocmask(SIG_UNBLOCK,&set,NULL) < 0) exit(0);
           //printf("state = %d\n",state);
           if(state == FG ) waitfg(pid);
@@ -288,8 +289,12 @@ void do_bgfg(char **argv)
       }else{
         if(strcmp(argv[0],"bg") == 0){
             job->state = BG;
+            kill(-job->pid,SIGCONT);
         }else{
+
             job->state = FG;
+            kill(-job->pid,SIGCONT);
+            waitfg(job->pid);
         }
       }
     }
@@ -323,21 +328,23 @@ void sigchld_handler(int sig)
     int stat;
     pid_t pid;
     //1 terminated
-    while ((pid = waitpid(-1, &stat, WNOHANG)) > 0){
+    while ((pid = waitpid(-1, &stat, WNOHANG| WUNTRACED )) > 0){
       struct job_t *job = getjobpid(jobs,pid);
-      if(WIFSIGNALED(stat)) deletejob(jobs, pid);
-      if(WIFSTOPPED(stat)) job->state = ST;
+      if(WEXITSTATUS(stat)) job->state = ST;
+      else if(WTERMSIG(stat)){
+        printf("Job [%d] (%d) terminated by signal 2 \n",job->jid,job->pid);
+        clearjob(job);
+
+      }
       if(WIFEXITED(stat)) deletejob(jobs, pid);
-
-      printf("status: %d\n",stat);
-      printf("Child %d terminated\n", pid);
-      printf("WIFEXITED: %d, WEXITSTATUS: %d, WIFSIGNALED: %d, WTERMSIG: %d, WCOREDUMP: %d, WIFSTOPPED: %d, WSTOPSIG: %d, WIFCONTINUED: %d\n",
-      WIFEXITED(stat), WEXITSTATUS(stat), WIFSIGNALED(stat), WTERMSIG(stat), 0/*WCOREDUMP(status)*/, WIFSTOPPED(stat),
+      /*
+      //printf("status: %d\n",stat);
+      //printf("Child %d terminated\n", pid);
+      printf("WIFEXITED: %d, WEXITSTATUS: %d, WIFSIGNALED: %d, WTERMSIG: %d, WIFSTOPPED: %d, WSTOPSIG: %d, WIFCONTINUED: %d\n",
+      WIFEXITED(stat), WEXITSTATUS(stat), WIFSIGNALED(stat), WTERMSIG(stat), WIFSTOPPED(stat),
       WSTOPSIG(stat), WIFCONTINUED(stat));
-
+      */
     }
-    //struct job_t *job = getjobpid(jobs,pid);
-    //job->state = ST;
 
 
     //exit sig add set
@@ -353,7 +360,12 @@ void sigchld_handler(int sig)
 void sigint_handler(int sig)
 {
     pid_t pid = fgpid(jobs);
-    kill(-pid,SIGINT);
+    if(pid){
+        struct job_t *job = getjobpid(jobs,pid);
+        printf("Job [%d] (%d) terminated by signal 2 \n",job->jid,job->pid);
+        clearjob(job);
+        kill(-pid,SIGINT);
+    }
     return;
 }
 
@@ -365,8 +377,12 @@ void sigint_handler(int sig)
 void sigtstp_handler(int sig)
 {
     pid_t pid = fgpid(jobs);
-    printf("pid %d\n",pid);
-    if(kill(pid,SIGTSTP)<0) printf("ERROR\n");
+    if(pid){
+        struct job_t *job = getjobpid(jobs,pid);
+        printf("Job [%d] (%d) stopped by signal 20\n",job->jid,job->pid);
+        job->state = ST;
+        if(kill(-pid,SIGTSTP)<0) printf("ERROR\n");
+    }
     return;
 }
 
@@ -418,6 +434,7 @@ int addjob(struct job_t *jobs, pid_t pid, int state, char *cmdline)
 	    jobs[i].pid = pid;
 	    jobs[i].state = state;
 	    jobs[i].jid = nextjid++;
+      nextjid = i+1;
 	    if (nextjid > MAXJOBS)
 		nextjid = 1;
 	    strcpy(jobs[i].cmdline, cmdline);
